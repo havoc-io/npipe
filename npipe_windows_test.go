@@ -211,7 +211,9 @@ func TestCancelAccept(t *testing.T) {
 		t.Fatalf("Listen(%q): %v", address, err)
 	}
 	cancelled := make(chan struct{}, 0)
+	started := make(chan bool)
 	go func() {
+		go close(started)
 		conn, _ := ln.Accept()
 		if conn != nil {
 			t.Fatalf("Unexpected incoming connection: %v", conn)
@@ -219,9 +221,10 @@ func TestCancelAccept(t *testing.T) {
 		}
 		cancelled <- struct{}{}
 	}()
-	// Close listener after 20ms. This should give the go routine enough time to be actually
+	// Close listener after 50ms. This should give the go routine enough time to be actually
 	// waiting for incoming connections inside ln.Accept().
-	time.AfterFunc(20*time.Millisecond, func() {
+	<-started
+	time.AfterFunc(50*time.Millisecond, func() {
 		if err := ln.Close(); err != nil {
 			t.Fatalf("Error closing listener: %v", err)
 		}
@@ -494,7 +497,7 @@ func listenAndClose(address string, t *testing.T) {
 // TestCommonUseCase is a full run-through of the most common use case, where you create a listener
 // and then dial into it with several clients in succession
 func TestCommonUseCase(t *testing.T) {
-	addrs := []string{`\\.\pipe\TestCommonUseCase`, `\\127.0.0.1\pipe\TestCommonUseCase`}
+	addrs := []string{`\\.\pipe\TestCommonUseCase`, `\\.\pipe\TestCommonUseCase`}
 	// always listen on the . version, since IP won't work for listening
 	ln, err := Listen(addrs[0])
 	if err != nil {
@@ -519,7 +522,7 @@ func TestCommonUseCase(t *testing.T) {
 
 		select {
 		case <-quit:
-		case <-time.After(time.Second):
+		case <-time.After(time.Minute):
 			t.Fatal("Failed to receive quit message after a reasonable timeout")
 		}
 	}
@@ -582,7 +585,7 @@ func startClient(address string, done chan bool, convos int, t *testing.T) {
 	var conn *PipeConn
 	select {
 	case conn = <-c:
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(time.Minute):
 		t.Fatal("Client timed out waiting for dial to resolve")
 	}
 	r := bufio.NewReader(conn)

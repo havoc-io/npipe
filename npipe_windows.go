@@ -60,8 +60,9 @@ const (
 	error_pipe_busy      syscall.Errno = 0xE7
 	error_sem_timeout    syscall.Errno = 0x79
 
-	error_bad_pathname syscall.Errno = 0xA1
-	error_invalid_name syscall.Errno = 0x7B
+	error_bad_pathname   syscall.Errno = 0xA1
+	error_invalid_name   syscall.Errno = 0x7B
+	error_path_not_found syscall.Errno = 0x03
 
 	error_io_incomplete syscall.Errno = 0x3e4
 )
@@ -227,7 +228,7 @@ func dial(address string, timeout uint32) (*PipeConn, error) {
 // Listen will return a PipeError for an incorrectly formatted pipe name.
 func Listen(address string) (*PipeListener, error) {
 	handle, err := createPipe(address, true)
-	if err == error_invalid_name {
+	if err == error_invalid_name || err == error_path_not_found {
 		return nil, badAddr(address)
 	}
 	if err != nil {
@@ -274,7 +275,20 @@ func (l *PipeListener) Accept() (net.Conn, error) {
 // It might return an error if a client connected and immediately cancelled
 // the connection.
 func (l *PipeListener) AcceptPipe() (*PipeConn, error) {
-	if l == nil || l.addr == "" || l.closed {
+	if l == nil {
+		return nil, syscall.EINVAL
+	}
+
+	locked := true
+	l.acceptMutex.Lock()
+	defer func() {
+		if locked {
+			l.acceptMutex.Unlock()
+		}
+	}()
+
+	addr := l.addr
+	if addr == "" || l.closed {
 		return nil, syscall.EINVAL
 	}
 
@@ -285,7 +299,7 @@ func (l *PipeListener) AcceptPipe() (*PipeConn, error) {
 	handle := l.handle
 	if handle == 0 {
 		var err error
-		handle, err = createPipe(string(l.addr), false)
+		handle, err = createPipe(string(addr), false)
 		if err != nil {
 			return nil, err
 		}
@@ -300,17 +314,16 @@ func (l *PipeListener) AcceptPipe() (*PipeConn, error) {
 	defer syscall.CloseHandle(overlapped.HEvent)
 	if err := connectNamedPipe(handle, overlapped); err != nil && err != error_pipe_connected {
 		if err == error_io_incomplete || err == syscall.ERROR_IO_PENDING {
-			l.acceptMutex.Lock()
 			l.acceptOverlapped = overlapped
 			l.acceptHandle = handle
-			l.acceptMutex.Unlock()
 			defer func() {
 				l.acceptMutex.Lock()
 				l.acceptOverlapped = nil
 				l.acceptHandle = 0
 				l.acceptMutex.Unlock()
 			}()
-
+			locked = false
+			l.acceptMutex.Unlock()
 			_, err = waitForCompletion(handle, overlapped)
 		}
 		if err == syscall.ERROR_OPERATION_ABORTED {
@@ -322,12 +335,19 @@ func (l *PipeListener) AcceptPipe() (*PipeConn, error) {
 			return nil, err
 		}
 	}
-	return &PipeConn{handle: handle, addr: l.addr}, nil
+	return &PipeConn{handle: handle, addr: addr}, nil
 }
 
 // Close stops listening on the address.
 // Already Accepted connections are not closed.
 func (l *PipeListener) Close() error {
+	if l == nil {
+		return syscall.EINVAL
+	}
+
+	l.acceptMutex.Lock()
+	defer l.acceptMutex.Unlock()
+
 	if l.closed {
 		return nil
 	}
@@ -343,8 +363,6 @@ func (l *PipeListener) Close() error {
 		}
 		l.handle = 0
 	}
-	l.acceptMutex.Lock()
-	defer l.acceptMutex.Unlock()
 	if l.acceptOverlapped != nil && l.acceptHandle != 0 {
 		// Cancel the pending IO. This call does not block, so it is safe
 		// to hold onto the mutex above.
