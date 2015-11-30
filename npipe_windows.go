@@ -116,7 +116,7 @@ func Dial(address string) (*PipeConn, error) {
 // DialAttributes acts like Dial, but allows you to set custom SecurityAttributes.
 func DialAttributes(address string, sa *syscall.SecurityAttributes) (*PipeConn, error) {
 	for {
-		conn, err := dial(address, nmpwait_wait_forever, nil)
+		conn, err := dial(address, nmpwait_wait_forever, sa)
 		if err == nil {
 			return conn, nil
 		}
