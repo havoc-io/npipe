@@ -110,8 +110,13 @@ func (e PipeError) Temporary() bool {
 //   // remote pipe
 //   conn, err := Dial(`\\othercomp\pipe\mypipename`)
 func Dial(address string) (*PipeConn, error) {
+	return DialAttributes(address, nil)
+}
+
+// DialAttributes acts like Dial, but allows you to set custom SecurityAttributes.
+func DialAttributes(address string, sa *syscall.SecurityAttributes) (*PipeConn, error) {
 	for {
-		conn, err := dial(address, nmpwait_wait_forever)
+		conn, err := dial(address, nmpwait_wait_forever, nil)
 		if err == nil {
 			return conn, nil
 		}
@@ -125,12 +130,18 @@ func Dial(address string) (*PipeConn, error) {
 
 // DialTimeout acts like Dial, but will time out after the duration of timeout
 func DialTimeout(address string, timeout time.Duration) (*PipeConn, error) {
+	return DialTimeoutAttributes(address, timeout, nil)
+}
+
+// DialTimeoutAttributes acts like DialTimeout, but allows you to set custom
+// SecurityAttributes.
+func DialTimeoutAttributes(address string, timeout time.Duration, sa *syscall.SecurityAttributes) (*PipeConn, error) {
 	deadline := time.Now().Add(timeout)
 
 	now := time.Now()
 	for now.Before(deadline) {
 		millis := uint32(deadline.Sub(now) / time.Millisecond)
-		conn, err := dial(address, millis)
+		conn, err := dial(address, millis, sa)
 		if err == nil {
 			return conn, nil
 		}
@@ -192,7 +203,7 @@ func waitForCompletion(handle syscall.Handle, overlapped *syscall.Overlapped) (u
 // dial is a helper to initiate a connection to a named pipe that has been started by a server.
 // The timeout is only enforced if the pipe server has already created the pipe, otherwise
 // this function will return immediately.
-func dial(address string, timeout uint32) (*PipeConn, error) {
+func dial(address string, timeout uint32, sa *syscall.SecurityAttributes) (*PipeConn, error) {
 	name, err := syscall.UTF16PtrFromString(string(address))
 	if err != nil {
 		return nil, err
@@ -214,7 +225,7 @@ func dial(address string, timeout uint32) (*PipeConn, error) {
 		return nil, err
 	}
 	handle, err := syscall.CreateFile(pathp, syscall.GENERIC_READ|syscall.GENERIC_WRITE,
-		uint32(syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE), nil, syscall.OPEN_EXISTING,
+		uint32(syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE), sa, syscall.OPEN_EXISTING,
 		syscall.FILE_FLAG_OVERLAPPED, 0)
 	if err != nil {
 		return nil, err
@@ -227,7 +238,12 @@ func dial(address string, timeout uint32) (*PipeConn, error) {
 //
 // Listen will return a PipeError for an incorrectly formatted pipe name.
 func Listen(address string) (*PipeListener, error) {
-	handle, err := createPipe(address, true)
+	return ListenAttributes(address, nil)
+}
+
+// ListenAttributes acts like Listen, but allows you to set custom SecurityAttributes.
+func ListenAttributes(address string, sa *syscall.SecurityAttributes) (*PipeListener, error) {
+	handle, err := createPipe(address, true, sa)
 	if err == error_invalid_name || err == error_path_not_found {
 		return nil, badAddr(address)
 	}
@@ -235,8 +251,9 @@ func Listen(address string) (*PipeListener, error) {
 		return nil, err
 	}
 	return &PipeListener{
-		addr:   PipeAddr(address),
-		handle: handle,
+		addr:               PipeAddr(address),
+		handle:             handle,
+		securityAttributes: sa,
 	}, nil
 }
 
@@ -255,6 +272,9 @@ type PipeListener struct {
 	acceptOverlapped *syscall.Overlapped
 	// acceptMutex protects the handle and overlapped structure.
 	acceptMutex sync.Mutex
+	// securityAttributes defines the security attributes of the named pipe.
+	// If it is nil, the Windows default is used.
+	securityAttributes *syscall.SecurityAttributes
 }
 
 // Accept implements the Accept method in the net.Listener interface; it
@@ -299,7 +319,7 @@ func (l *PipeListener) AcceptPipe() (*PipeConn, error) {
 	handle := l.handle
 	if handle == 0 {
 		var err error
-		handle, err = createPipe(string(addr), false)
+		handle, err = createPipe(string(addr), false, l.securityAttributes)
 		if err != nil {
 			return nil, err
 		}
@@ -512,7 +532,7 @@ func (a PipeAddr) String() string {
 // with the same arguments, since subsequent calls to create pipe need
 // to use the same arguments as the first one. If first is set, fail
 // if the pipe already exists.
-func createPipe(address string, first bool) (syscall.Handle, error) {
+func createPipe(address string, first bool, sa *syscall.SecurityAttributes) (syscall.Handle, error) {
 	n, err := syscall.UTF16PtrFromString(address)
 	if err != nil {
 		return 0, err
@@ -525,7 +545,7 @@ func createPipe(address string, first bool) (syscall.Handle, error) {
 		mode,
 		pipe_type_byte,
 		pipe_unlimited_instances,
-		512, 512, 0, nil)
+		512, 512, 0, sa)
 }
 
 func badAddr(addr string) PipeError {
